@@ -110,11 +110,16 @@ repackage(){
 	echo "Unzip success."
 	echo "Repackaging ..."
 	cd ${CURR_DIR}/${PACKAGE_NAME}
+	sanitize_pyproject_for_runtime
+	mkdir -p ./wheels
+	download_setuptools
 	pip download ${PIP_PLATFORM} -r requirements.txt -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
 	if [[ $? -ne 0 ]]; then
 		echo "Pip download failed."
 		exit 1
 	fi
+	build_wheels_from_sdists
+	cleanup_wheels_non_whl
 	if [[ "linux" == "$OS_TYPE" ]]; then
 		sed -i '1i\--no-index --find-links=./wheels/' requirements.txt
 	elif [[ "darwin" == "$OS_TYPE" ]]; then
@@ -123,6 +128,8 @@ repackage(){
 	  ' requirements.txt
 		rm -f requirements.txt.bak
 	fi
+	# Patch pyproject.toml so that uv also uses local wheels (offline)
+	inject_uv_offline_config
 	IGNORE_PATH=.difyignore
 	if [ ! -f "$IGNORE_PATH" ]; then
 		IGNORE_PATH=.gitignore
@@ -145,15 +152,110 @@ repackage(){
 	echo "Repackage success."
 }
 
+# 如果 'unzip' 命令不存在，则安装它。
 install_unzip(){
 	if ! command -v unzip &> /dev/null; then
 		echo "Installing unzip ..."
-		yum -y install unzip
+		#yum -y install unzip
+		sudo apt -y install unzip
 		if [ $? -ne 0 ]; then
 			echo "Install unzip failed."
 			exit 1
 		fi
 	fi
+}
+
+download_setuptools(){
+    echo "Downloading setuptools..."
+	pip download ${PIP_PLATFORM} "setuptools>=40.8.0" -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
+    if [[ $? -ne 0 ]]; then
+        echo "Download setuptools failed."
+        exit 1
+    fi
+}
+
+sanitize_pyproject_for_runtime(){
+	if [ ! -f "pyproject.toml" ]; then
+		return 0
+	fi
+
+	python - <<'PY'
+from pathlib import Path
+
+path = Path("pyproject.toml")
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+result = []
+skip = False
+for line in lines:
+	stripped = line.strip()
+	if stripped.startswith("[") and stripped.endswith("]"):
+		table_name = stripped[1:-1].strip()
+		if table_name == "dependency-groups":
+			skip = True
+			continue
+		if skip and table_name.startswith("dependency-groups."):
+			continue
+		skip = False
+
+	if not skip:
+		result.append(line)
+
+path.write_text("".join(result), encoding="utf-8")
+PY
+}
+
+# Inject [tool.uv] no-index + find-links into pyproject.toml so that
+# `uv sync` (used by the plugin daemon) installs from local wheels only.
+inject_uv_offline_config(){
+	if [ ! -f "pyproject.toml" ]; then
+		return 0
+	fi
+
+	python - <<'PY'
+from pathlib import Path
+
+path = Path("pyproject.toml")
+content = path.read_text(encoding="utf-8")
+
+uv_block = """
+[tool.uv]
+no-index = true
+find-links = ["./wheels/"]
+environments = ["sys_platform == 'linux'"]
+"""
+
+# Remove any existing [tool.uv] section to avoid duplicates
+import re
+content = re.sub(
+    r'\n?\[tool\.uv\][^\[]*',
+    '',
+    content,
+    flags=re.DOTALL,
+)
+
+content = content.rstrip("\n") + "\n" + uv_block.lstrip("\n")
+path.write_text(content, encoding="utf-8")
+PY
+	echo "Injected [tool.uv] offline config into pyproject.toml"
+}
+
+build_wheels_from_sdists(){
+	while IFS= read -r -d '' sdist_file; do
+		pip wheel --no-deps -w ./wheels "${sdist_file}"
+		if [[ $? -ne 0 ]]; then
+			echo "Build wheel failed: ${sdist_file}"
+			exit 1
+		fi
+		rm -f "${sdist_file}"
+	done < <(find ./wheels -maxdepth 1 -type f \( -name "*.tar.gz" -o -name "*.zip" \) -print0)
+}
+
+cleanup_wheels_non_whl(){
+	if [ ! -d "./wheels" ]; then
+		return 0
+	fi
+	find ./wheels -type f ! -name "*.whl" -delete
 }
 
 print_usage() {
@@ -167,7 +269,7 @@ print_usage() {
 
 while getopts "p:s:" opt; do
 	case "$opt" in
-		p) PIP_PLATFORM="--platform ${OPTARG} --only-binary=:all:" ;;
+		p) PIP_PLATFORM="--platform ${OPTARG}" ;;
 		s) PACKAGE_SUFFIX="${OPTARG}" ;;
 		*) print_usage; exit 1 ;;
 	esac
