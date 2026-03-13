@@ -113,7 +113,7 @@ repackage(){
 	sanitize_pyproject_for_runtime
 	mkdir -p ./wheels
 	download_setuptools
-	pip download ${PIP_PLATFORM} -r requirements.txt -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
+	pip download ${PIP_PLATFORM} --only-binary=:all: -r requirements.txt -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
 	if [[ $? -ne 0 ]]; then
 		echo "Pip download failed."
 		exit 1
@@ -167,7 +167,7 @@ install_unzip(){
 
 download_setuptools(){
     echo "Downloading setuptools..."
-	pip download ${PIP_PLATFORM} "setuptools>=40.8.0" -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
+	pip download ${PIP_PLATFORM} --only-binary=:all: "setuptools>=40.8.0" -d ./wheels --index-url ${PIP_MIRROR_URL} --trusted-host mirrors.aliyun.com
     if [[ $? -ne 0 ]]; then
         echo "Download setuptools failed."
         exit 1
